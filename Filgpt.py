@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-# Sample training data (very simple)
+# --- 1. Prepare the Data ---
+
+# Sample training sentences
 sentences = [
     "hello how are you",
     "hello what is your name",
@@ -10,73 +12,107 @@ sentences = [
     "what time is it now"
 ]
 
-# Tokenize and build vocabulary
-words = set(" ".join(sentences).split())  # Unique words
-word2idx = {word: i for i, word in enumerate(words)}
-idx2word = {i: word for word, i in word2idx.items()}
-VOCAB_SIZE = len(word2idx)
-EMBED_DIM = 8  # Small embedding size
-HIDDEN_DIM = 16  # Small hidden layer size
+# Tokenize sentences into words
+all_words = " ".join(sentences).split()
+vocab = sorted(set(all_words))
+word2idx = {word: idx for idx, word in enumerate(vocab)}
+idx2word = {idx: word for word, idx in word2idx.items()}
 
-# Convert sentences to training pairs
-train_data = []
+VOCAB_SIZE = len(vocab)
+CONTEXT_SIZE = 2  # Use the last 2 words as context to predict the next word
+
+# Build training sequences:
+# For each sentence, for every consecutive sequence of CONTEXT_SIZE words,
+# predict the next word.
+train_inputs = []
+train_targets = []
 for sentence in sentences:
     tokens = sentence.split()
-    for i in range(len(tokens) - 1):
-        input_word = word2idx[tokens[i]]
-        target_word = word2idx[tokens[i + 1]]
-        train_data.append((input_word, target_word))
+    if len(tokens) <= CONTEXT_SIZE:
+        continue  # skip if sentence is too short
+    for i in range(len(tokens) - CONTEXT_SIZE):
+        context = tokens[i:i+CONTEXT_SIZE]
+        target = tokens[i+CONTEXT_SIZE]
+        # Convert words to indices
+        train_inputs.append([word2idx[w] for w in context])
+        train_targets.append(word2idx[target])
 
-# Convert to tensors
-X_train = torch.tensor([x[0] for x in train_data], dtype=torch.long)
-Y_train = torch.tensor([x[1] for x in train_data], dtype=torch.long)
+# Convert training data to tensors
+X_train = torch.tensor(train_inputs, dtype=torch.long)  # shape: (num_samples, CONTEXT_SIZE)
+Y_train = torch.tensor(train_targets, dtype=torch.long)   # shape: (num_samples)
 
-# Define a small language model
+# --- 2. Define the Model ---
+
 class TinyLM(nn.Module):
-    def __init__(self, vocab_size, embed_dim, hidden_dim):
+    def __init__(self, vocab_size, embed_dim, hidden_dim, context_size):
         super(TinyLM, self).__init__()
-        self.embed = nn.Embedding(vocab_size, embed_dim)  # Word embeddings
-        self.rnn = nn.RNN(embed_dim, hidden_dim, batch_first=True)  # Simple RNN
-        self.fc = nn.Linear(hidden_dim, vocab_size)  # Output layer
+        self.embed = nn.Embedding(vocab_size, embed_dim)
+        # LSTM expects input shape (batch, seq_len, embed_dim)
+        self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True)
+        # The fully connected layer outputs a prediction over the vocabulary
+        self.fc = nn.Linear(hidden_dim, vocab_size)
+        self.context_size = context_size
 
     def forward(self, x):
-        x = self.embed(x)  # Convert word index to embeddings
-        x, _ = self.rnn(x.unsqueeze(0))  # Pass through RNN
-        x = self.fc(x.squeeze(0))  # Convert hidden state to vocab size
-        return x
+        # x shape: (batch, context_size)
+        embeds = self.embed(x)  # shape: (batch, context_size, embed_dim)
+        lstm_out, _ = self.lstm(embeds)  # shape: (batch, context_size, hidden_dim)
+        # We take the output from the last time step
+        last_output = lstm_out[:, -1, :]  # shape: (batch, hidden_dim)
+        out = self.fc(last_output)  # shape: (batch, vocab_size)
+        return out
 
-# Initialize model, loss, and optimizer
-model = TinyLM(VOCAB_SIZE, EMBED_DIM, HIDDEN_DIM)
+# Hyperparameters
+EMBED_DIM = 16
+HIDDEN_DIM = 32
+
+# Instantiate the model
+model = TinyLM(VOCAB_SIZE, EMBED_DIM, HIDDEN_DIM, CONTEXT_SIZE)
+
+# Loss function and optimizer
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.01)
 
-# Train the model
-for epoch in range(1000):
+# --- 3. Train the Model ---
+EPOCHS = 1000
+for epoch in range(EPOCHS):
+    model.train()
     optimizer.zero_grad()
-    output = model(X_train)
-    loss = criterion(output, Y_train)
+    outputs = model(X_train)  # shape: (num_samples, vocab_size)
+    loss = criterion(outputs, Y_train)
     loss.backward()
     optimizer.step()
 
     if epoch % 200 == 0:
         print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
 
-# Function to generate text from user input
-def predict_next_word(model, word):
+# --- 4. Interactive Prediction ---
+def predict_next_word(model, input_text):
+    """
+    Takes an input string (e.g., a sentence), uses the last CONTEXT_SIZE words,
+    and predicts the next word.
+    """
     model.eval()
-    word_idx = word2idx.get(word, None)
-    if word_idx is None:
-        return "Word not in vocabulary. Try another."
+    tokens = input_text.lower().split()
+    if len(tokens) < CONTEXT_SIZE:
+        return f"Please provide at least {CONTEXT_SIZE} words for context."
     
-    input_tensor = torch.tensor([word_idx], dtype=torch.long)
+    context = tokens[-CONTEXT_SIZE:]
+    try:
+        context_idx = torch.tensor([[word2idx[w] for w in context]], dtype=torch.long)
+    except KeyError:
+        return "One or more words not in vocabulary. Try using different words."
+    
     with torch.no_grad():
-        output = model(input_tensor)
+        output = model(context_idx)  # shape: (1, vocab_size)
         predicted_idx = torch.argmax(output, dim=1).item()
         return idx2word[predicted_idx]
 
-# User input loop
+# --- 5. User Input Loop ---
+print("\nEnter a sentence (at least 2 words) for prediction, or type 'exit' to quit.")
 while True:
-    user_input = input("\nEnter a word: ").strip().lower()
-    if user_input == "exit":
+    user_input = input("\nYour input: ").strip()
+    if user_input.lower() == "exit":
         break
-    print(f"Prediction: {predict_next_word(model, user_input)}")
+    prediction = predict_next_word(model, user_input)
+    print("Prediction:", prediction)
